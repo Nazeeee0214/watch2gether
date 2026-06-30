@@ -21,6 +21,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
   const [playing, setPlaying] = useState(false);
   const [played, setPlayed] = useState(0);
   const [muted, setMuted] = useState(true); // Auto-play policies often require muted
+  const [volume, setVolume] = useState(0.8); // Default volume level (80%)
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,6 +66,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
     setPlayed(0);
     setDuration(0);
     setError(null);
+  }
+
+  const [prevScreenSharing, setPrevScreenSharing] = useState(isScreenSharing);
+  if (isScreenSharing !== prevScreenSharing) {
+    setPrevScreenSharing(isScreenSharing);
+    if (isScreenSharing) {
+      setPlaying(true);
+    }
   }
 
   const resolvedSource = ResolveVideoSource(url);
@@ -198,13 +207,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
         {isScreenSharing && screenShareStream ? (
           <video
             ref={(videoNode) => {
-              if (videoNode && videoNode.srcObject !== screenShareStream) {
-                videoNode.srcObject = screenShareStream;
+              if (videoNode) {
+                if (videoNode.srcObject !== screenShareStream) {
+                  videoNode.srcObject = screenShareStream;
+                }
+                // Explicitly set the DOM property directly to bypass React's muted attribute update bug
+                videoNode.muted = isHost || muted;
+                videoNode.volume = volume;
+                
+                // Allow participants to control the screen share feed play/pause locally
+                if (playing) {
+                  videoNode.play().catch(() => {});
+                } else {
+                  videoNode.pause();
+                }
               }
             }}
-            autoPlay
             playsInline
-            muted={isHost || muted} // Mute local host or if user selected mute
             className="w-full h-full object-contain"
           />
         ) : mounted && (
@@ -215,6 +234,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
             height="100%"
             playing={playing}
             muted={muted}
+            volume={volume}
             onPlay={handlePlay}
             onPause={handlePause}
             onDurationChange={() => {
@@ -269,15 +289,44 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
             </div>
             <div className="flex items-center gap-2">
               {!isHost && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setMuted(!muted);
-                  }}
-                  className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
-                >
-                  {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-                </button>
+                <>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPlaying(!playing);
+                    }}
+                    className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
+                  >
+                    {playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMuted(!muted);
+                      }}
+                      className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
+                    >
+                      {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                    </button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={muted ? 0 : volume}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        const val = parseFloat(e.target.value);
+                        setVolume(val);
+                        if (val > 0) {
+                          setMuted(false);
+                        }
+                      }}
+                      className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
+                    />
+                  </div>
+                </>
               )}
               <button
                 onClick={(e) => {
@@ -321,12 +370,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
                   {playing ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
                 </button>
                 
-                <button
-                  onClick={() => setMuted(!muted)}
-                  className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
-                >
-                  {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setMuted(!muted)}
+                    className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
+                  >
+                    {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={muted ? 0 : volume}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setVolume(val);
+                      if (val > 0) {
+                        setMuted(false);
+                      }
+                    }}
+                    className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
+                  />
+                </div>
               </div>
 
               <div className="flex items-center gap-2">
