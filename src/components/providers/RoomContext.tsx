@@ -237,10 +237,11 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           pc.ontrack = (event) => {
             console.log("[WebRTC] Guest received remote track:", event.track.kind);
             if (event.streams && event.streams[0]) {
-              setScreenShareStream(event.streams[0]);
+              // Recreate the MediaStream instance to force React to update the state and bind the audio track
+              setScreenShareStream(new MediaStream(event.streams[0].getTracks()));
             } else {
               setScreenShareStream((prevStream) => {
-                const stream = prevStream || new MediaStream();
+                const stream = prevStream ? new MediaStream(prevStream.getTracks()) : new MediaStream();
                 stream.addTrack(event.track);
                 return stream;
               });

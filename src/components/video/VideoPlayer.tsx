@@ -7,14 +7,14 @@ const Player = ReactPlayer as any;
 
 import { useRoom } from '@/components/providers/RoomContext';
 import { ResolveVideoSource } from '@/lib/utils';
-import { Play, Pause, Volume2, VolumeX, Maximize, AlertTriangle } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, Minimize2, AlertTriangle } from 'lucide-react';
 
 interface VideoPlayerProps {
   url: string;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
-  const { socket, isHost, roomId, isScreenSharing, screenShareStream } = useRoom();
+  const { socket, isHost, roomId, isScreenSharing, screenShareStream, stopScreenShare } = useRoom();
   const playerRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -25,11 +25,35 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
   const [error, setError] = useState<string | null>(null);
 
   const [mounted, setMounted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showControls, setShowControls] = useState(false);
+  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   useEffect(() => {
     const timer = setTimeout(() => setMounted(true), 0);
-    return () => clearTimeout(timer);
+    
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    };
   }, []);
+
+  const triggerShowControls = () => {
+    setShowControls(true);
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false);
+    }, 3500);
+  };
 
   const isSyncing = useRef(false);
 
@@ -164,7 +188,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
   };
 
   return (
-    <div ref={containerRef} className="relative group w-full max-w-5xl mx-auto rounded-2xl overflow-hidden shadow-2xl bg-black border border-white/10">
+    <div 
+      ref={containerRef} 
+      onMouseMove={triggerShowControls}
+      onClick={triggerShowControls}
+      className="relative group w-full max-w-5xl mx-auto rounded-2xl overflow-hidden shadow-2xl bg-black border border-white/10"
+    >
       <div className="aspect-video w-full relative">
         {isScreenSharing && screenShareStream ? (
           <video
@@ -220,46 +249,64 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
       </div>
 
       {/* Custom Controls Overlay */}
-      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+      <div className={`absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'}`}>
         {isScreenSharing ? (
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" />
               <span className="text-xs text-white/90 font-semibold uppercase tracking-wider">Live Screen Share</span>
+              {isHost && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    stopScreenShare();
+                  }}
+                  className="px-3 py-1 ml-2 bg-red-600 hover:bg-red-500 active:scale-95 text-[10px] font-semibold rounded-lg text-white uppercase transition"
+                >
+                  Stop Sharing
+                </button>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {!isHost && (
                 <button
-                  onClick={() => setMuted(!muted)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMuted(!muted);
+                  }}
                   className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
                 >
                   {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
                 </button>
               )}
               <button
-                onClick={toggleFullScreen}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleFullScreen();
+                }}
                 className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
               >
-                <Maximize size={20} />
+                {isFullscreen ? <Minimize2 size={20} /> : <Maximize size={20} />}
               </button>
             </div>
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
             {/* Progress Bar */}
             <div className="flex items-center gap-2">
-              <span className="text-xs text-white/80 font-medium font-mono">
+              <span className="text-xs text-white/80 font-medium font-mono font-semibold">
                 {formatTime(played)}
               </span>
               <input
                 type="range"
                 min={0}
                 max={duration || 1}
+                step="any"
                 value={played}
                 onChange={handleSeek}
                 className="flex-1 h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:w-4 hover:[&::-webkit-slider-thumb]:h-4 transition-all"
               />
-              <span className="text-xs text-white/80 font-medium font-mono">
+              <span className="text-xs text-white/80 font-medium font-mono font-semibold">
                 {formatTime(duration)}
               </span>
             </div>
@@ -287,7 +334,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
                   onClick={toggleFullScreen}
                   className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
                 >
-                  <Maximize size={20} />
+                  {isFullscreen ? <Minimize2 size={20} /> : <Maximize size={20} />}
                 </button>
               </div>
             </div>
