@@ -120,6 +120,61 @@ io.on('connection', (socket) => {
     });
   });
 
+  // --- CHAT ---
+  socket.on('chat:message', (data) => {
+    if (!socket.roomId) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
+
+    const message = {
+      userId: socket.userId,
+      username: data.username || 'Unknown',
+      text: String(data.text || '').trim().slice(0, 500), // cap at 500 chars
+      timestamp: Date.now()
+    };
+
+    if (!message.text) return;
+
+    // Broadcast to everyone in the room including sender
+    io.to(socket.roomId).emit('chat:message', message);
+  });
+
+  // --- OPEN MIC SIGNALING ---
+  socket.on('mic:signal', (data) => {
+    if (!socket.roomId) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
+
+    // Only relay to recipients in same room
+    const targetInRoom = room.users.some(u => u.socketId === data.targetSocketId);
+    if (!targetInRoom) return;
+
+    io.to(data.targetSocketId).emit('mic:signal', {
+      senderSocketId: socket.id,
+      signal: data.signal
+    });
+  });
+
+  // Broadcast mic toggle state to the room
+  socket.on('mic:toggle', (data) => {
+    if (!socket.roomId) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
+
+    // Track which users have mic active on each user object
+    const user = room.users.find(u => u.userId === socket.userId);
+    if (user) {
+      user.micActive = !!data.active;
+    }
+
+    io.to(socket.roomId).emit('room:state', {
+      users: room.users,
+      hostId: room.hostId,
+      videoUrl: room.videoUrl,
+      isScreenSharing: room.isScreenSharing
+    });
+  });
+
   socket.on('disconnect', () => {
     console.log(`User disconnected: ${socket.id}`);
     if (socket.roomId && rooms[socket.roomId]) {

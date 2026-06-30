@@ -8,6 +8,14 @@ interface User {
   userId: string;
   username: string;
   socketId: string;
+  micActive?: boolean;
+}
+
+export interface ChatMessage {
+  userId: string;
+  username: string;
+  text: string;
+  timestamp: number;
 }
 
 interface RoomState {
@@ -29,6 +37,12 @@ interface RoomContextType {
   screenShareStream: MediaStream | null;
   startScreenShare: () => Promise<void>;
   stopScreenShare: () => void;
+  // Chat
+  messages: ChatMessage[];
+  sendChatMessage: (text: string) => void;
+  // Open Mic
+  isMicActive: boolean;
+  toggleMic: () => Promise<void>;
 }
 
 const RoomContext = createContext<RoomContextType | undefined>(undefined);
@@ -46,6 +60,17 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const peerConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
   const pendingCandidates = useRef<{ [socketId: string]: any[] }>({});
 
+  // Chat state
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Open Mic state
+  const [isMicActive, setIsMicActive] = useState(false);
+  const micStream = useRef<MediaStream | null>(null);
+  const micPeerConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
+  const micPendingCandidates = useRef<{ [socketId: string]: any[] }>({});
+
+  const socketRef = useRef<Socket | null>(null);
+
   const isHost = roomState.hostId === userId;
 
   useEffect(() => {
@@ -55,14 +80,73 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     newSocket.on('connect', () => {
       setSocket(newSocket);
+      socketRef.current = newSocket;
     });
 
     newSocket.on('room:state', (state: RoomState) => {
       setRoomState(state);
     });
 
+    newSocket.on('chat:message', (msg: ChatMessage) => {
+      setMessages(prev => [...prev, msg]);
+    });
+
+    newSocket.on('mic:signal', async (data: { senderSocketId: string; signal: any }) => {
+      const { senderSocketId, signal } = data;
+
+      if (signal.type === 'offer') {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        micPeerConnections.current[senderSocketId] = pc;
+
+        pc.onicecandidate = (e) => {
+          if (e.candidate && socketRef.current) {
+            socketRef.current.emit('mic:signal', { targetSocketId: senderSocketId, signal: { candidate: e.candidate } });
+          }
+        };
+
+        pc.ontrack = (e) => {
+          const audio = document.getElementById(`mic-audio-${senderSocketId}`) as HTMLAudioElement || document.createElement('audio');
+          audio.id = `mic-audio-${senderSocketId}`;
+          audio.srcObject = e.streams[0] || new MediaStream([e.track]);
+          audio.autoplay = true;
+          if (!document.getElementById(`mic-audio-${senderSocketId}`)) {
+            document.body.appendChild(audio);
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(signal));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        newSocket.emit('mic:signal', { targetSocketId: senderSocketId, signal: answer });
+
+        // process pending candidates
+        for (const c of (micPendingCandidates.current[senderSocketId] || [])) {
+          await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
+        }
+        micPendingCandidates.current[senderSocketId] = [];
+
+      } else if (signal.type === 'answer') {
+        const pc = micPeerConnections.current[senderSocketId];
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(signal)).catch(console.error);
+          for (const c of (micPendingCandidates.current[senderSocketId] || [])) {
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
+          }
+          micPendingCandidates.current[senderSocketId] = [];
+        }
+      } else if (signal.candidate) {
+        const pc = micPeerConnections.current[senderSocketId];
+        if (pc && pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(console.error);
+        } else {
+          micPendingCandidates.current[senderSocketId] = [...(micPendingCandidates.current[senderSocketId] || []), signal.candidate];
+        }
+      }
+    });
+
     return () => {
       newSocket.close();
+      socketRef.current = null;
     };
   }, []);
 
@@ -328,6 +412,54 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [roomState.isScreenSharing, isHost, isScreenSharing, screenShareStream]);
 
+  const sendChatMessage = (text: string) => {
+    if (!socketRef.current || !username || !text.trim()) return;
+    socketRef.current.emit('chat:message', { username, text: text.trim() });
+  };
+
+  const toggleMic = async () => {
+    if (isMicActive) {
+      // Turn off mic: stop tracks, close connections, notify room
+      micStream.current?.getTracks().forEach(t => t.stop());
+      micStream.current = null;
+      Object.values(micPeerConnections.current).forEach(pc => pc.close());
+      micPeerConnections.current = {};
+      micPendingCandidates.current = {};
+      // Remove any injected audio elements
+      document.querySelectorAll('[id^="mic-audio-"]').forEach(el => el.remove());
+      setIsMicActive(false);
+      socketRef.current?.emit('mic:toggle', { active: false });
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micStream.current = stream;
+        setIsMicActive(true);
+        socketRef.current?.emit('mic:toggle', { active: true });
+
+        // Establish peer connections with all other users currently in room
+        const others = roomState.users.filter(u => u.userId !== userId);
+        for (const other of others) {
+          const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+          micPeerConnections.current[other.socketId] = pc;
+
+          stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+          pc.onicecandidate = (e) => {
+            if (e.candidate && socketRef.current) {
+              socketRef.current.emit('mic:signal', { targetSocketId: other.socketId, signal: { candidate: e.candidate } });
+            }
+          };
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current?.emit('mic:signal', { targetSocketId: other.socketId, signal: offer });
+        }
+      } catch (err) {
+        console.error('[Mic] Failed to get user media:', err);
+      }
+    }
+  };
+
   return (
     <RoomContext.Provider value={{ 
       socket, 
@@ -340,7 +472,11 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isScreenSharing,
       screenShareStream,
       startScreenShare,
-      stopScreenShare
+      stopScreenShare,
+      messages,
+      sendChatMessage,
+      isMicActive,
+      toggleMic,
     }}>
       {children}
     </RoomContext.Provider>
