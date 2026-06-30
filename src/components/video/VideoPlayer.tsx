@@ -14,7 +14,7 @@ interface VideoPlayerProps {
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
-  const { socket, isHost, roomId, isScreenSharing, screenShareStream, stopScreenShare } = useRoom();
+  const { socket, isHost, roomId, isScreenSharing, screenShareStream, stopScreenShare, isCameraShare } = useRoom();
   const playerRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -276,7 +276,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
           <div className="flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" />
-              <span className="text-xs text-white/90 font-semibold uppercase tracking-wider">Live Screen Share</span>
+              <span className="text-xs text-white/90 font-semibold uppercase tracking-wider">
+                {isCameraShare ? 'Live Camera' : 'Live Screen Share'}
+              </span>
               {isHost && (
                 <button
                   onClick={(e) => {

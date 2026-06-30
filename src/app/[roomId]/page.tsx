@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { RoomProvider, useRoom } from '@/components/providers/RoomContext';
 import { VideoPlayer } from '@/components/video/VideoPlayer';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { Users, Link as LinkIcon, Check, Monitor, Mic, MicOff, MessageSquare } from 'lucide-react';
+import { Users, Link as LinkIcon, Check, Monitor, Camera, Mic, MicOff, MessageSquare } from 'lucide-react';
 
 // Wrap the main content in RoomProvider
 export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
@@ -23,7 +23,7 @@ function RoomContent({ roomId }: { roomId: string }) {
   const isCreatorParam = searchParams.get('creator') === 'true';
   const {
     joinRoom, roomState, isHost, socket,
-    isScreenSharing, startScreenShare, stopScreenShare,
+    isScreenSharing, startScreenShare, stopScreenShare, isCameraShare,
     isMicActive, toggleMic,
   } = useRoom();
 
@@ -88,8 +88,13 @@ function RoomContent({ roomId }: { roomId: string }) {
                     : 'bg-purple-600/20 text-purple-400 border-purple-500/30 hover:bg-purple-500/30 hover:text-white'
                 }`}
               >
-                <Monitor size={16} />
-                {isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
+                {isCameraShare ? <Camera size={16} /> : <Monitor size={16} />}
+                {isScreenSharing
+                  ? 'Stop Sharing'
+                  : (typeof window !== 'undefined' && navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices)
+                    ? 'Share Screen'
+                    : 'Share Camera'
+                }
               </button>
             )}
 

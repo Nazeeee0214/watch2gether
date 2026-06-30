@@ -37,6 +37,7 @@ interface RoomContextType {
   screenShareStream: MediaStream | null;
   startScreenShare: () => Promise<void>;
   stopScreenShare: () => void;
+  isCameraShare: boolean;
   // Chat
   messages: ChatMessage[];
   sendChatMessage: (text: string) => void;
@@ -57,6 +58,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenShareStream, setScreenShareStream] = useState<MediaStream | null>(null);
+  const [isCameraShare, setIsCameraShare] = useState(false);
   const peerConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
   const pendingCandidates = useRef<{ [socketId: string]: any[] }>({});
 
@@ -228,11 +230,30 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const startScreenShare = async () => {
     try {
-      console.log("[WebRTC] Requesting screen sharing display media...");
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: 'always' } as any,
-        audio: true
-      });
+      const canScreenShare =
+        typeof navigator !== 'undefined' &&
+        !!navigator.mediaDevices &&
+        'getDisplayMedia' in navigator.mediaDevices;
+
+      let stream: MediaStream;
+
+      if (canScreenShare) {
+        // Desktop: use real screen capture
+        console.log('[WebRTC] Requesting screen share via getDisplayMedia...');
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' } as any,
+          audio: true
+        });
+        setIsCameraShare(false);
+      } else {
+        // Mobile fallback: share camera feed
+        console.log('[WebRTC] getDisplayMedia unavailable — falling back to camera share...');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true
+        });
+        setIsCameraShare(true);
+      }
 
       setScreenShareStream(stream);
       setIsScreenSharing(true);
@@ -248,19 +269,20 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Handle when screen sharing is stopped using the native browser sharing bar
+      // Handle when sharing is stopped via browser/OS controls
       stream.getVideoTracks()[0].onended = () => {
-        console.log("[WebRTC] Screen sharing ended via browser controls");
+        console.log('[WebRTC] Share ended via browser controls');
         stopScreenShare();
       };
     } catch (err) {
-      console.error("[WebRTC] Error starting screen share:", err);
+      console.error('[WebRTC] Error starting share:', err);
     }
   };
 
   const stopScreenShare = () => {
-    console.log("[WebRTC] Stopping screen share...");
+    console.log('[WebRTC] Stopping share...');
     setIsScreenSharing(false);
+    setIsCameraShare(false);
 
     if (screenShareStream) {
       screenShareStream.getTracks().forEach(track => track.stop());
@@ -473,6 +495,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       screenShareStream,
       startScreenShare,
       stopScreenShare,
+      isCameraShare,
       messages,
       sendChatMessage,
       isMicActive,
