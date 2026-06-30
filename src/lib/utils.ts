@@ -10,7 +10,8 @@ export const ResolveVideoSource = (inputUrl: string): { type: 'DIRECT' | 'PLATFO
   
   if (isDirectFile) {
     // Append your self-hosted proxy address to circumvent missing Access-Control-Allow-Origin headers
-    const proxyPrefix = "http://localhost:8085/";
+    const proxyPrefix = process.env.NEXT_PUBLIC_CORS_PROXY_URL || 
+      (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8085/` : 'http://localhost:8085/');
     return {
       type: 'DIRECT',
       finalUrl: `${proxyPrefix}${inputUrl}`

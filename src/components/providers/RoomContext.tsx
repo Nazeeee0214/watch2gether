@@ -49,7 +49,9 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isHost = roomState.hostId === userId;
 
   useEffect(() => {
-    const newSocket = io('http://localhost:3001');
+    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 
+      (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:3001` : 'http://localhost:3001');
+    const newSocket = io(socketUrl);
 
     newSocket.on('connect', () => {
       setSocket(newSocket);
