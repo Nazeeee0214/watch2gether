@@ -201,9 +201,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
       ref={containerRef} 
       onMouseMove={triggerShowControls}
       onClick={triggerShowControls}
-      className="relative group w-full max-w-5xl mx-auto rounded-2xl overflow-hidden shadow-2xl bg-black border border-white/10"
+      className={`relative group w-full mx-auto bg-black overflow-hidden shadow-2xl border border-white/10 ${
+        isFullscreen
+          ? 'w-full h-full rounded-none flex flex-col justify-center'
+          : 'max-w-5xl rounded-2xl'
+      }`}
     >
-      <div className="aspect-video w-full relative">
+      <div className={isFullscreen ? 'relative w-full h-full flex items-center justify-center' : 'aspect-video w-full relative'}>
         {isScreenSharing && screenShareStream ? (
           <video
             ref={(videoNode) => {
@@ -214,15 +218,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
                 // Explicitly set the DOM property directly to bypass React's muted attribute update bug
                 videoNode.muted = isHost || muted;
                 videoNode.volume = volume;
-                
-                // Allow participants to control the screen share feed play/pause locally
-                if (playing) {
-                  videoNode.play().catch(() => {});
-                } else {
-                  videoNode.pause();
-                }
               }
             }}
+            autoPlay
             playsInline
             className="w-full h-full object-contain"
           />
@@ -269,7 +267,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
       </div>
 
       {/* Custom Controls Overlay */}
-      <div className={`absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'}`}>
+      <div 
+        className={`absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent transition-opacity duration-300 ${
+          isFullscreen ? 'opacity-100' : showControls ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'
+        }`}
+      >
         {isScreenSharing ? (
           <div className="flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2">
@@ -289,44 +291,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ url }) => {
             </div>
             <div className="flex items-center gap-2">
               {!isHost && (
-                <>
+                <div className="flex items-center gap-1">
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setPlaying(!playing);
+                      setMuted(!muted);
                     }}
                     className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
                   >
-                    {playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
+                    {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
                   </button>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMuted(!muted);
-                      }}
-                      className="text-white hover:text-white/80 transition p-2 hover:bg-white/10 rounded-full"
-                    >
-                      {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-                    </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={muted ? 0 : volume}
-                      onChange={(e) => {
-                        e.stopPropagation();
-                        const val = parseFloat(e.target.value);
-                        setVolume(val);
-                        if (val > 0) {
-                          setMuted(false);
-                        }
-                      }}
-                      className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
-                    />
-                  </div>
-                </>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={muted ? 0 : volume}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      const val = parseFloat(e.target.value);
+                      setVolume(val);
+                      if (val > 0) setMuted(false);
+                    }}
+                    className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
+                  />
+                </div>
               )}
               <button
                 onClick={(e) => {
