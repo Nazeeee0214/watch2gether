@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { RoomProvider, useRoom } from '@/components/providers/RoomContext';
 import { VideoPlayer } from '@/components/video/VideoPlayer';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { Users, Link as LinkIcon, Check, Monitor, Camera, Mic, MicOff, MessageSquare } from 'lucide-react';
+import { Users, Link as LinkIcon, Check, Monitor, Camera, Mic, MicOff, MessageSquare, LogOut } from 'lucide-react';
 
 // Wrap the main content in RoomProvider
 export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
@@ -19,12 +19,13 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
 function RoomContent({ roomId }: { roomId: string }) {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const [username] = useState(() => searchParams.get('username') || `User-${Math.floor(Math.random() * 1000)}`);
   const isCreatorParam = searchParams.get('creator') === 'true';
   const {
     joinRoom, roomState, isHost, socket,
     isScreenSharing, startScreenShare, stopScreenShare, isCameraShare,
-    isMicActive, toggleMic,
+    isMicActive, toggleMic, leaveRoom,
   } = useRoom();
 
   const [inputUrl, setInputUrl] = useState('');
@@ -117,6 +118,19 @@ function RoomContent({ roomId }: { roomId: string }) {
             >
               {copied ? <Check size={16} className="text-green-400" /> : <LinkIcon size={16} />}
               {copied ? 'Copied!' : 'Copy Invite Link'}
+            </button>
+
+            <button
+              onClick={() => {
+                if (window.confirm('Are you sure you want to leave the room?')) {
+                  leaveRoom();
+                  router.push('/');
+                }
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 rounded-xl text-sm font-medium transition-all"
+            >
+              <LogOut size={16} />
+              Leave Room
             </button>
           </div>
         </header>

@@ -35,7 +35,8 @@ io.on('connection', (socket) => {
         users: [],
         hostId: userId,
         videoUrl: '',
-        isScreenSharing: false
+        isScreenSharing: false,
+        sharingUserId: null
       };
     }
 
@@ -62,7 +63,8 @@ io.on('connection', (socket) => {
       users: room.users,
       hostId: room.hostId,
       videoUrl: room.videoUrl,
-      isScreenSharing: room.isScreenSharing
+      isScreenSharing: room.isScreenSharing,
+      sharingUserId: room.sharingUserId
     });
 
     console.log(`User ${username} (${userId}) joined room ${roomId}`);
@@ -92,24 +94,79 @@ io.on('connection', (socket) => {
         users: room.users,
         hostId: room.hostId,
         videoUrl: room.videoUrl,
-        isScreenSharing: room.isScreenSharing
+        isScreenSharing: room.isScreenSharing,
+        sharingUserId: room.sharingUserId
       });
     }
   });
 
+  // Any participant can share screen (not just host). Only one sharer at a time.
   socket.on('video:toggle_screenshare', (data) => {
     if (!socket.roomId) return;
     const room = rooms[socket.roomId];
-    if (room && room.hostId === socket.userId) {
-      room.isScreenSharing = data.active;
-      // Broadcast the updated state reliably to everyone in the room
-      io.to(socket.roomId).emit('room:state', {
-        users: room.users,
-        hostId: room.hostId,
-        videoUrl: room.videoUrl,
-        isScreenSharing: room.isScreenSharing
-      });
+    if (!room) return;
+
+    if (data.active) {
+      // Stop any existing share first (auto-preempt)
+      room.isScreenSharing = true;
+      room.sharingUserId = socket.userId;
+    } else {
+      // Only the current sharer or host can stop
+      if (room.sharingUserId === socket.userId || room.hostId === socket.userId) {
+        room.isScreenSharing = false;
+        room.sharingUserId = null;
+      } else {
+        return; // Unauthorized stop attempt — ignore
+      }
     }
+
+    io.to(socket.roomId).emit('room:state', {
+      users: room.users,
+      hostId: room.hostId,
+      videoUrl: room.videoUrl,
+      isScreenSharing: room.isScreenSharing,
+      sharingUserId: room.sharingUserId
+    });
+  });
+
+  // Host directly transfers host role to another user
+  socket.on('room:transfer_host', (data) => {
+    if (!socket.roomId) return;
+    const room = rooms[socket.roomId];
+    if (!room || room.hostId !== socket.userId) return; // Only host can transfer
+
+    const { newHostUserId } = data;
+    const newHost = room.users.find(u => u.userId === newHostUserId);
+    if (!newHost) return; // Target user not in room
+
+    room.hostId = newHostUserId;
+    console.log(`Host transferred to ${newHost.username} (${newHostUserId}) in room ${socket.roomId}`);
+
+    io.to(socket.roomId).emit('room:state', {
+      users: room.users,
+      hostId: room.hostId,
+      videoUrl: room.videoUrl,
+      isScreenSharing: room.isScreenSharing,
+      sharingUserId: room.sharingUserId
+    });
+  });
+
+  // Non-host requests to become host; server relays only to host's socket
+  socket.on('room:request_host', (data) => {
+    if (!socket.roomId) return;
+    const room = rooms[socket.roomId];
+    if (!room) return;
+    if (room.hostId === socket.userId) return; // Already host
+
+    const { fromUsername } = data;
+    const hostUser = room.users.find(u => u.userId === room.hostId);
+    if (!hostUser) return;
+
+    // Relay request ONLY to the host's socket
+    io.to(hostUser.socketId).emit('room:host_requested', {
+      fromUserId: socket.userId,
+      fromUsername: fromUsername || 'A participant'
+    });
   });
 
   socket.on('webrtc:signal', (data) => {
@@ -171,7 +228,8 @@ io.on('connection', (socket) => {
       users: room.users,
       hostId: room.hostId,
       videoUrl: room.videoUrl,
-      isScreenSharing: room.isScreenSharing
+      isScreenSharing: room.isScreenSharing,
+      sharingUserId: room.sharingUserId
     });
   });
 
@@ -180,23 +238,26 @@ io.on('connection', (socket) => {
     if (socket.roomId && rooms[socket.roomId]) {
       const room = rooms[socket.roomId];
       room.users = room.users.filter(u => u.socketId !== socket.id);
-      
+
+      // If the sharer disconnected, clear sharing state
+      if (room.sharingUserId === socket.userId) {
+        room.isScreenSharing = false;
+        room.sharingUserId = null;
+      }
+
       if (room.users.length === 0) {
         delete rooms[socket.roomId];
-      } else if (room.hostId === socket.userId) {
-        room.hostId = room.users[0].userId;
-        io.to(socket.roomId).emit('room:state', {
-          users: room.users,
-          hostId: room.hostId,
-          videoUrl: room.videoUrl,
-          isScreenSharing: room.isScreenSharing
-        });
       } else {
+        // Auto-assign new host if host disconnected
+        if (room.hostId === socket.userId) {
+          room.hostId = room.users[0].userId;
+        }
         io.to(socket.roomId).emit('room:state', {
           users: room.users,
           hostId: room.hostId,
           videoUrl: room.videoUrl,
-          isScreenSharing: room.isScreenSharing
+          isScreenSharing: room.isScreenSharing,
+          sharingUserId: room.sharingUserId
         });
       }
     }

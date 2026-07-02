@@ -23,6 +23,7 @@ interface RoomState {
   hostId: string | null;
   videoUrl: string;
   isScreenSharing: boolean;
+  sharingUserId: string | null;
 }
 
 interface RoomContextType {
@@ -32,7 +33,9 @@ interface RoomContextType {
   username: string;
   roomId: string | null;
   joinRoom: (roomId: string, username: string, isCreator?: boolean) => void;
+  leaveRoom: () => void;
   isHost: boolean;
+  isSharer: boolean;
   isScreenSharing: boolean;
   screenShareStream: MediaStream | null;
   startScreenShare: () => Promise<void>;
@@ -44,17 +47,52 @@ interface RoomContextType {
   // Open Mic
   isMicActive: boolean;
   toggleMic: () => Promise<void>;
+  // Host management
+  transferHost: (targetUserId: string) => void;
+  requestHost: () => void;
 }
+
+const optimizeSenders = async (pc: RTCPeerConnection) => {
+  try {
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+      if (!sender || !sender.track) continue;
+      const parameters = sender.getParameters();
+      if (!parameters) continue;
+      if (!parameters.encodings) {
+        parameters.encodings = [{}];
+      }
+      let changed = false;
+      if (sender.track.kind === 'video') {
+        parameters.encodings[0].maxBitrate = 1200000; // 1.2 Mbps
+        parameters.encodings[0].maxFramerate = 30;
+        changed = true;
+        console.log('[WebRTC] Web video sender optimized: 1.2 Mbps max, 30fps max');
+      } else if (sender.track.kind === 'audio') {
+        parameters.encodings[0].maxBitrate = 48000; // 48 kbps
+        changed = true;
+        console.log('[WebRTC] Web audio sender optimized: 48 kbps max');
+      }
+      if (changed) {
+        await sender.setParameters(parameters).catch(e => console.warn('[WebRTC] Error calling setParameters:', e));
+      }
+    }
+  } catch (e) {
+    console.warn('[WebRTC] Failed to optimize senders:', e);
+  }
+};
 
 const RoomContext = createContext<RoomContextType | undefined>(undefined);
 
 export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [roomState, setRoomState] = useState<RoomState>({ users: [], hostId: null, videoUrl: '', isScreenSharing: false });
+  const [roomState, setRoomState] = useState<RoomState>({
+    users: [], hostId: null, videoUrl: '', isScreenSharing: false, sharingUserId: null
+  });
   const [userId] = useState(() => Math.random().toString(36).substring(2, 15));
   const [username, setUsername] = useState('');
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [roomInfo, setRoomInfo] = useState<{ id: string, name: string, creator: boolean } | null>(null);
+  const [roomInfo, setRoomInfo] = useState<{ id: string; name: string; creator: boolean } | null>(null);
 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenShareStream, setScreenShareStream] = useState<MediaStream | null>(null);
@@ -68,21 +106,74 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Open Mic state
   const [isMicActive, setIsMicActive] = useState(false);
   const micStream = useRef<MediaStream | null>(null);
-  const micPeerConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
-  const micPendingCandidates = useRef<{ [socketId: string]: any[] }>({});
+  const outgoingMicConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
+  const incomingMicConnections = useRef<{ [socketId: string]: RTCPeerConnection }>({});
+  const outgoingMicPendingCandidates = useRef<{ [socketId: string]: any[] }>({});
+  const incomingMicPendingCandidates = useRef<{ [socketId: string]: any[] }>({});
 
   const socketRef = useRef<Socket | null>(null);
+  const screenShareStreamRef = useRef<MediaStream | null>(null);
 
   const isHost = roomState.hostId === userId;
+  const isSharer = roomState.sharingUserId === userId;
+
+  // Keep screenShareStreamRef in sync with screenShareStream state for safe unmount cleanup
+  useEffect(() => {
+    screenShareStreamRef.current = screenShareStream;
+  }, [screenShareStream]);
+
+  // Clean up all streams and peer connections on component unmount
+  useEffect(() => {
+    return () => {
+      console.log('[RoomContext] Unmounting, cleaning up all media streams and connections...');
+      if (screenShareStreamRef.current) {
+        screenShareStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      if (micStream.current) {
+        micStream.current.getTracks().forEach(t => t.stop());
+        micStream.current = null;
+      }
+      Object.values(peerConnections.current).forEach(pc => {
+        try { pc.close(); } catch (e) {}
+      });
+      Object.values(outgoingMicConnections.current).forEach(pc => {
+        try { pc.close(); } catch (e) {}
+      });
+      Object.values(incomingMicConnections.current).forEach(pc => {
+        try { pc.close(); } catch (e) {}
+      });
+      if (typeof document !== 'undefined') {
+        document.querySelectorAll('[id^="mic-audio-"]').forEach(el => el.remove());
+      }
+    };
+  }, []);
 
   useEffect(() => {
+    if (!roomInfo) return;
+
     const socketUrl = process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 
       (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:3001` : 'http://localhost:3001');
-    const newSocket = io(socketUrl);
+    console.log(`[Socket] Connecting to server: ${socketUrl}`);
+    const newSocket = io(socketUrl, {
+      transports: ['websocket'],
+      forceNew: true
+    });
 
     newSocket.on('connect', () => {
+      console.log('[Socket] Connected with ID:', newSocket.id);
       setSocket(newSocket);
       socketRef.current = newSocket;
+
+      newSocket.emit('room:join', {
+        roomId: roomInfo.id,
+        userId,
+        username: roomInfo.name,
+        isCreator: roomInfo.creator
+      });
+    });
+
+    newSocket.on('connect_error', (err) => {
+      console.error('[Socket] Connection Error:', err.message);
     });
 
     newSocket.on('room:state', (state: RoomState) => {
@@ -93,81 +184,296 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setMessages(prev => [...prev, msg]);
     });
 
-    newSocket.on('mic:signal', async (data: { senderSocketId: string; signal: any }) => {
+    newSocket.on('error', (err: { message: string }) => {
+      console.error('[Socket] Server error:', err.message);
+    });
+
+    // Host transfer: host receives a request from a participant
+    newSocket.on('room:host_requested', (data: { fromUserId: string; fromUsername: string }) => {
+      const approved = window.confirm(
+        `🎤 Host Request\n${data.fromUsername} is requesting to become the host. Approve?`
+      );
+      if (approved && socketRef.current) {
+        socketRef.current.emit('room:transfer_host', { newHostUserId: data.fromUserId });
+      }
+    });
+
+    // WebRTC Screenshare Relay signaling (Guests rendering screen share)
+    newSocket.on('webrtc:signal', async (data: { senderSocketId: string; signal: any }) => {
       const { senderSocketId, signal } = data;
 
       if (signal.type === 'offer') {
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        micPeerConnections.current[senderSocketId] = pc;
+        try {
+          console.log('[WebRTC] Guest received SDP offer from:', senderSocketId);
+          const pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+          });
 
-        pc.onicecandidate = (e) => {
-          if (e.candidate && socketRef.current) {
-            socketRef.current.emit('mic:signal', { targetSocketId: senderSocketId, signal: { candidate: e.candidate } });
-          }
-        };
+          peerConnections.current[senderSocketId] = pc;
 
-        pc.ontrack = (e) => {
-          const audio = document.getElementById(`mic-audio-${senderSocketId}`) as HTMLAudioElement || document.createElement('audio');
-          audio.id = `mic-audio-${senderSocketId}`;
-          audio.srcObject = e.streams[0] || new MediaStream([e.track]);
-          audio.autoplay = true;
-          if (!document.getElementById(`mic-audio-${senderSocketId}`)) {
-            document.body.appendChild(audio);
-          }
-        };
+          pc.onicecandidate = (event) => {
+            if (event.candidate && socketRef.current) {
+              console.log('[WebRTC] Guest generated ICE candidate for:', senderSocketId);
+              socketRef.current.emit('webrtc:signal', {
+                targetSocketId: senderSocketId,
+                signal: { candidate: event.candidate }
+              });
+            }
+          };
 
-        await pc.setRemoteDescription(new RTCSessionDescription(signal));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        newSocket.emit('mic:signal', { targetSocketId: senderSocketId, signal: answer });
+          pc.ontrack = (event) => {
+            console.log('[WebRTC] Guest received remote track:', event.track.kind);
+            if (event.streams && event.streams[0]) {
+              setScreenShareStream(new MediaStream(event.streams[0].getTracks()));
+            } else {
+              setScreenShareStream((prevStream) => {
+                const stream = prevStream ? new MediaStream(prevStream.getTracks()) : new MediaStream();
+                stream.addTrack(event.track);
+                return stream;
+              });
+            }
+          };
 
-        // process pending candidates
-        for (const c of (micPendingCandidates.current[senderSocketId] || [])) {
-          await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
-        }
-        micPendingCandidates.current[senderSocketId] = [];
+          await pc.setRemoteDescription(new RTCSessionDescription({ type: signal.type, sdp: signal.sdp }));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
 
-      } else if (signal.type === 'answer') {
-        const pc = micPeerConnections.current[senderSocketId];
-        if (pc) {
-          await pc.setRemoteDescription(new RTCSessionDescription(signal)).catch(console.error);
-          for (const c of (micPendingCandidates.current[senderSocketId] || [])) {
+          newSocket.emit('webrtc:signal', {
+            targetSocketId: senderSocketId,
+            signal: answer
+          });
+
+          // Process queued ICE candidates
+          const candidates = pendingCandidates.current[senderSocketId] || [];
+          for (const c of candidates) {
             await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
           }
-          micPendingCandidates.current[senderSocketId] = [];
+          pendingCandidates.current[senderSocketId] = [];
+        } catch (e) {
+          console.error('[WebRTC] Error handling offer:', e);
+        }
+      } else if (signal.type === 'answer') {
+        const pc = peerConnections.current[senderSocketId];
+        if (pc) {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: signal.type, sdp: signal.sdp }));
+            const candidates = pendingCandidates.current[senderSocketId] || [];
+            for (const c of candidates) {
+              await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
+            }
+            pendingCandidates.current[senderSocketId] = [];
+          } catch (e) {
+            console.error('[WebRTC] Error handling answer:', e);
+          }
         }
       } else if (signal.candidate) {
-        const pc = micPeerConnections.current[senderSocketId];
+        const pc = peerConnections.current[senderSocketId];
         if (pc && pc.remoteDescription) {
-          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(console.error);
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+          } catch (e) {
+            console.error('[WebRTC] Error adding ICE candidate:', e);
+          }
         } else {
-          micPendingCandidates.current[senderSocketId] = [...(micPendingCandidates.current[senderSocketId] || []), signal.candidate];
+          if (!pendingCandidates.current[senderSocketId]) {
+            pendingCandidates.current[senderSocketId] = [];
+          }
+          pendingCandidates.current[senderSocketId].push(signal.candidate);
+        }
+      }
+    });
+
+    // Voice open mic WebRTC signaling
+    newSocket.on('mic:signal', async (data: { senderSocketId: string; signal: any }) => {
+      const { senderSocketId, signal } = data;
+      const micOwnerSocketId: string = signal.micOwnerSocketId ?? senderSocketId;
+      const isMyMicStream = micOwnerSocketId === newSocket.id;
+
+      const iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
+      ];
+
+      if (signal.type === 'offer') {
+        try {
+          console.log('[WebRTC Mic] Offer received from sender:', senderSocketId);
+          
+          if (incomingMicConnections.current[micOwnerSocketId]) {
+            try { incomingMicConnections.current[micOwnerSocketId].close(); } catch (e) {}
+            delete incomingMicConnections.current[micOwnerSocketId];
+            delete incomingMicPendingCandidates.current[micOwnerSocketId];
+          }
+
+          const pc = new RTCPeerConnection({ iceServers });
+          incomingMicConnections.current[micOwnerSocketId] = pc;
+
+          const isCurrent = () => incomingMicConnections.current[micOwnerSocketId] === pc;
+
+          pc.onicecandidate = (e) => {
+            if (e.candidate && socketRef.current && isCurrent()) {
+              socketRef.current.emit('mic:signal', {
+                targetSocketId: senderSocketId,
+                signal: { 
+                  candidate: e.candidate,
+                  micOwnerSocketId 
+                }
+              });
+            }
+          };
+
+          pc.ontrack = (e) => {
+            console.log('[WebRTC Mic] Received remote audio track from sender:', micOwnerSocketId);
+            const audio = document.getElementById(`mic-audio-${micOwnerSocketId}`) as HTMLAudioElement || document.createElement('audio');
+            audio.id = `mic-audio-${micOwnerSocketId}`;
+            audio.srcObject = e.streams[0] || new MediaStream([e.track]);
+            audio.autoplay = true;
+            if (!document.getElementById(`mic-audio-${micOwnerSocketId}`)) {
+              document.body.appendChild(audio);
+            }
+          };
+
+          pc.onconnectionstatechange = () => {
+            console.log(`[WebRTC Mic] Incoming connection state with ${micOwnerSocketId}: ${pc.connectionState}`);
+          };
+
+          await pc.setRemoteDescription(new RTCSessionDescription({ type: signal.type, sdp: signal.sdp }));
+          
+          if (!isCurrent()) {
+            console.log('[WebRTC Mic] Offer superseded by newer one during setRemoteDescription, aborting.');
+            return;
+          }
+
+          if (pc.signalingState !== 'have-remote-offer') {
+            console.warn('[WebRTC Mic] Unexpected signalingState after setRemoteDescription:', pc.signalingState, '— aborting answer.');
+            return;
+          }
+
+          const answer = await pc.createAnswer();
+          
+          if (!isCurrent() || (pc.signalingState as string) === 'closed') {
+            console.log('[WebRTC Mic] PC closed or superseded before setLocalDescription, aborting.');
+            return;
+          }
+
+          await pc.setLocalDescription(answer);
+
+          newSocket.emit('mic:signal', { 
+            targetSocketId: senderSocketId, 
+            signal: { type: answer.type, sdp: answer.sdp, micOwnerSocketId } 
+          });
+
+          const candidates = incomingMicPendingCandidates.current[micOwnerSocketId] || [];
+          for (const c of candidates) {
+            if (!isCurrent()) break;
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
+          }
+          if (isCurrent()) {
+            incomingMicPendingCandidates.current[micOwnerSocketId] = [];
+          }
+        } catch (err) {
+          console.error('[WebRTC Mic] Error handling offer:', err);
+        }
+      } else if (signal.type === 'answer') {
+        const pc = outgoingMicConnections.current[senderSocketId];
+        if (pc) {
+          try {
+            console.log('[WebRTC Mic] Answer received from listener:', senderSocketId);
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: signal.type, sdp: signal.sdp }));
+            const candidates = outgoingMicPendingCandidates.current[senderSocketId] || [];
+            for (const c of candidates) {
+              await pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error);
+            }
+            outgoingMicPendingCandidates.current[senderSocketId] = [];
+          } catch (e) {
+            console.error('[WebRTC Mic] Error handling answer:', e);
+          }
+        }
+      } else if (signal.candidate) {
+        if (isMyMicStream) {
+          const pc = outgoingMicConnections.current[senderSocketId];
+          if (pc && pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(console.error);
+          } else {
+            if (!outgoingMicPendingCandidates.current[senderSocketId]) {
+              outgoingMicPendingCandidates.current[senderSocketId] = [];
+            }
+            outgoingMicPendingCandidates.current[senderSocketId].push(signal.candidate);
+          }
+        } else {
+          const pc = incomingMicConnections.current[micOwnerSocketId];
+          if (pc && pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(console.error);
+          } else {
+            if (!incomingMicPendingCandidates.current[micOwnerSocketId]) {
+              incomingMicPendingCandidates.current[micOwnerSocketId] = [];
+            }
+            incomingMicPendingCandidates.current[micOwnerSocketId].push(signal.candidate);
+          }
         }
       }
     });
 
     return () => {
+      console.log('[Socket] Disconnecting socket...');
       newSocket.close();
       socketRef.current = null;
+      setSocket(null);
     };
-  }, []);
+  }, [roomInfo]);
 
   const joinRoom = (newRoomId: string, name: string, isCreator?: boolean) => {
     setUsername(name);
     setRoomId(newRoomId);
+    setMessages([]);
+    setRoomState({ users: [], hostId: null, videoUrl: '', isScreenSharing: false, sharingUserId: null });
     setRoomInfo({ id: newRoomId, name, creator: !!isCreator });
   };
 
-  useEffect(() => {
-    if (socket && roomInfo) {
-      socket.emit('room:join', { 
-        roomId: roomInfo.id, 
-        userId, 
-        username: roomInfo.name, 
-        isCreator: roomInfo.creator 
-      });
+  const leaveRoom = () => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
     }
-  }, [socket, roomInfo, userId]);
+    setRoomId(null);
+    setRoomInfo(null);
+    setSocket(null);
+    setMessages([]);
+    setRoomState({ users: [], hostId: null, videoUrl: '', isScreenSharing: false, sharingUserId: null });
+    setIsScreenSharing(false);
+    setScreenShareStream(null);
+
+    // Clean up connections
+    Object.values(peerConnections.current).forEach((pc: any) => {
+      try { pc.close(); } catch(e) {}
+    });
+    peerConnections.current = {};
+    pendingCandidates.current = {};
+
+    // Clean up mic connections
+    Object.values(outgoingMicConnections.current).forEach((pc: any) => {
+      try { pc.close(); } catch(e) {}
+    });
+    outgoingMicConnections.current = {};
+    outgoingMicPendingCandidates.current = {};
+
+    Object.values(incomingMicConnections.current).forEach((pc: any) => {
+      try { pc.close(); } catch(e) {}
+    });
+    incomingMicConnections.current = {};
+    incomingMicPendingCandidates.current = {};
+
+    if (micStream.current) {
+      micStream.current.getTracks().forEach((t: any) => t.stop());
+      micStream.current = null;
+    }
+    setIsMicActive(false);
+
+    if (typeof document !== 'undefined') {
+      document.querySelectorAll('[id^="mic-audio-"]').forEach(el => el.remove());
+    }
+  };
 
   const processPendingCandidates = async (socketId: string, pc: RTCPeerConnection) => {
     const candidates = pendingCandidates.current[socketId] || [];
@@ -188,7 +494,8 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       console.log("[WebRTC] Creating peer connection for guest socket ID:", targetSocketId);
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceCandidatePoolSize: 2
       });
 
       peerConnections.current[targetSocketId] = pc;
@@ -216,6 +523,8 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      await optimizeSenders(pc);
+
       if (socket) {
         console.log("[WebRTC] Host sending SDP offer to:", targetSocketId);
         socket.emit('webrtc:signal', {
@@ -230,6 +539,14 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const startScreenShare = async () => {
     try {
+      if (screenShareStream) {
+        try {
+          screenShareStream.getTracks().forEach(track => track.stop());
+        } catch (e) {
+          console.warn('[WebRTC] Error stopping previous tracks:', e);
+        }
+        setScreenShareStream(null);
+      }
       const canScreenShare =
         typeof navigator !== 'undefined' &&
         !!navigator.mediaDevices &&
@@ -300,153 +617,175 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Connect WebRTC to new users joining mid-screen-share
+  // Connect WebRTC to new users joining mid-screen-share (any sharer, not just host)
   useEffect(() => {
-    if (!isHost || !isScreenSharing || !screenShareStream || !socket) return;
+    if (!isSharer || !isScreenSharing || !screenShareStream || !socket) return;
 
     const currentGuests = roomState.users.filter(u => u.userId !== userId);
     for (const guest of currentGuests) {
       if (!peerConnections.current[guest.socketId]) {
-        console.log("[WebRTC] New user joined mid-stream, connecting:", guest.socketId);
+        console.log('[WebRTC] New user joined mid-stream, connecting:', guest.socketId);
         createPeerConnection(guest.socketId, screenShareStream);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomState.users, isHost, isScreenSharing, screenShareStream, socket]);
+  }, [roomState.users, isSharer, isScreenSharing, screenShareStream, socket]);
 
-  // Handle incoming signaling messages (offers, answers, ICE candidates)
+  // Synchronize screen share state with roomState for guests inside useEffect
   useEffect(() => {
-    if (!socket) return;
-
-    const handleSignal = async (data: { senderSocketId: string; signal: any }) => {
-      const { senderSocketId, signal } = data;
-
-      if (signal.type === 'offer') {
-        try {
-          console.log("[WebRTC] Guest received SDP offer from:", senderSocketId);
-          const pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-          });
-
-          peerConnections.current[senderSocketId] = pc;
-
-          pc.onicecandidate = (event) => {
-            if (event.candidate) {
-              console.log("[WebRTC] Guest generated ICE candidate for:", senderSocketId);
-              socket.emit('webrtc:signal', {
-                targetSocketId: senderSocketId,
-                signal: { candidate: event.candidate }
-              });
-            }
-          };
-
-          pc.ontrack = (event) => {
-            console.log("[WebRTC] Guest received remote track:", event.track.kind);
-            if (event.streams && event.streams[0]) {
-              // Recreate the MediaStream instance to force React to update the state and bind the audio track
-              setScreenShareStream(new MediaStream(event.streams[0].getTracks()));
-            } else {
-              setScreenShareStream((prevStream) => {
-                const stream = prevStream ? new MediaStream(prevStream.getTracks()) : new MediaStream();
-                stream.addTrack(event.track);
-                return stream;
-              });
-            }
-          };
-
-          pc.onconnectionstatechange = () => {
-            console.log(`[WebRTC] Connection state with host ${senderSocketId}: ${pc.connectionState}`);
-          };
-
-          await pc.setRemoteDescription(new RTCSessionDescription(signal));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-
-          console.log("[WebRTC] Guest sending SDP answer to:", senderSocketId);
-          socket.emit('webrtc:signal', {
-            targetSocketId: senderSocketId,
-            signal: answer
-          });
-
-          // Process any ICE candidates that were queued
-          await processPendingCandidates(senderSocketId, pc);
-        } catch (e) {
-          console.error("[WebRTC] Error handling offer:", e);
-        }
-      } else if (signal.type === 'answer') {
-        const pc = peerConnections.current[senderSocketId];
-        if (pc) {
-          try {
-            console.log("[WebRTC] Host received SDP answer from:", senderSocketId);
-            await pc.setRemoteDescription(new RTCSessionDescription(signal));
-            // Process any ICE candidates that were queued
-            await processPendingCandidates(senderSocketId, pc);
-          } catch (e) {
-            console.error("[WebRTC] Error handling answer:", e);
-          }
-        }
-      } else if (signal.candidate) {
-        const pc = peerConnections.current[senderSocketId];
-        if (pc && pc.remoteDescription) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-          } catch (e) {
-            console.error("[WebRTC] Error adding ICE candidate:", e);
-          }
-        } else {
-          // Queue candidate if remote description isn't set yet
-          if (!pendingCandidates.current[senderSocketId]) {
-            pendingCandidates.current[senderSocketId] = [];
-          }
-          pendingCandidates.current[senderSocketId].push(signal.candidate);
-        }
-      }
-    };
-
-    socket.on('webrtc:signal', handleSignal);
-
-    return () => {
-      socket.off('webrtc:signal', handleSignal);
-    };
-  }, [socket]);
-
-  // Synchronize screen share state with roomState for guests inside useEffect to satisfy React 19 ref rules
-  useEffect(() => {
-    if (isHost) return;
+    if (isSharer) return;
 
     if (roomState.isScreenSharing && !isScreenSharing) {
       console.log("[WebRTC] Syncing screen share state to active based on room state");
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsScreenSharing(true);
     } else if (!roomState.isScreenSharing && isScreenSharing) {
       console.log("[WebRTC] Syncing screen share state to inactive based on room state");
       setIsScreenSharing(false);
       // Clean up guest side media stream and peer connections safely
       if (screenShareStream) {
-        screenShareStream.getTracks().forEach(track => track.stop());
+        try { screenShareStream.getTracks().forEach(track => track.stop()); } catch (e) {}
       }
       setScreenShareStream(null);
       Object.keys(peerConnections.current).forEach(socketId => {
-        peerConnections.current[socketId].close();
+        try { peerConnections.current[socketId].close(); } catch (e) {}
       });
       peerConnections.current = {};
       pendingCandidates.current = {};
     }
-  }, [roomState.isScreenSharing, isHost, isScreenSharing, screenShareStream]);
+  }, [roomState.isScreenSharing, isSharer, isScreenSharing]);
 
   const sendChatMessage = (text: string) => {
     if (!socketRef.current || !username || !text.trim()) return;
     socketRef.current.emit('chat:message', { username, text: text.trim() });
   };
 
+  const transferHost = (targetUserId: string) => {
+    if (!isHost || !socketRef.current) return;
+    socketRef.current.emit('room:transfer_host', { newHostUserId: targetUserId });
+  };
+
+  const requestHost = () => {
+    if (isHost || !socketRef.current) return;
+    socketRef.current.emit('room:request_host', { fromUsername: username });
+  };
+
+  const startOutgoingAudio = async (targetSocketId: string) => {
+    if (!micStream.current) return;
+    try {
+      console.log('[WebRTC Mic] Initiating outgoing audio connection to:', targetSocketId);
+      const iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
+      ];
+
+      const pc = new RTCPeerConnection({
+        iceServers,
+        iceCandidatePoolSize: 2
+      });
+      outgoingMicConnections.current[targetSocketId] = pc;
+
+      micStream.current.getTracks().forEach(track => {
+        pc.addTrack(track, micStream.current!);
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && socketRef.current) {
+          socketRef.current.emit('mic:signal', {
+            targetSocketId,
+            signal: { 
+              candidate: event.candidate,
+              micOwnerSocketId: socketRef.current.id 
+            }
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        console.log(`[WebRTC Mic] Outgoing connection state to ${targetSocketId}: ${pc.connectionState}`);
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await optimizeSenders(pc);
+
+      if (socketRef.current) {
+        socketRef.current.emit('mic:signal', {
+          targetSocketId,
+          signal: { type: offer.type, sdp: offer.sdp, micOwnerSocketId: socketRef.current.id }
+        });
+      }
+    } catch (e) {
+      console.error('[WebRTC Mic] Error creating outgoing connection:', e);
+    }
+  };
+
+  // Synchronize Voice Chat Peer Connections dynamically
+  useEffect(() => {
+    if (!socket) return;
+
+    // 1. Synchronize INCOMING connections (we are listening to others)
+    const activeMicGuests = roomState.users.filter(u => u.userId !== userId && u.micActive);
+    const activeMicSocketIds = new Set(activeMicGuests.map(g => g.socketId));
+
+    // Cleanup disconnected or muted incoming streams
+    Object.keys(incomingMicConnections.current).forEach((socketId) => {
+      if (!activeMicSocketIds.has(socketId)) {
+        console.log(`[WebRTC Mic Cleanup] User ${socketId} muted or left. Closing incoming connection.`);
+        try {
+          incomingMicConnections.current[socketId].close();
+        } catch (e) {}
+        delete incomingMicConnections.current[socketId];
+        delete incomingMicPendingCandidates.current[socketId];
+        // Remove audio element
+        document.getElementById(`mic-audio-${socketId}`)?.remove();
+      }
+    });
+
+    // 2. Synchronize OUTGOING connections (we are broadcasting our voice)
+    if (isMicActive && micStream.current) {
+      const otherUsers = roomState.users.filter(u => u.userId !== userId);
+      
+      // Establish connections to new users in the room
+      otherUsers.forEach((user) => {
+        if (!outgoingMicConnections.current[user.socketId]) {
+          startOutgoingAudio(user.socketId);
+        }
+      });
+
+      // Cleanup outgoing connections to users who left
+      const currentRoomSocketIds = new Set(otherUsers.map(u => u.socketId));
+      Object.keys(outgoingMicConnections.current).forEach((socketId) => {
+        if (!currentRoomSocketIds.has(socketId)) {
+          console.log(`[WebRTC Mic Cleanup] Guest ${socketId} left room. Tearing down outgoing connection.`);
+          try {
+            outgoingMicConnections.current[socketId].close();
+          } catch (e) {}
+          delete outgoingMicConnections.current[socketId];
+          delete outgoingMicPendingCandidates.current[socketId];
+        }
+      });
+    } else {
+      // If our mic is disabled, make sure all outgoing connections are closed
+      Object.keys(outgoingMicConnections.current).forEach((socketId) => {
+        console.log(`[WebRTC Mic Cleanup] Mic disabled. Closing outgoing connection to ${socketId}.`);
+        try {
+          outgoingMicConnections.current[socketId].close();
+        } catch (e) {}
+      });
+      outgoingMicConnections.current = {};
+      outgoingMicPendingCandidates.current = {};
+    }
+  }, [roomState.users, isMicActive, socket]);
+
   const toggleMic = async () => {
     if (isMicActive) {
       // Turn off mic: stop tracks, close connections, notify room
       micStream.current?.getTracks().forEach(t => t.stop());
       micStream.current = null;
-      Object.values(micPeerConnections.current).forEach(pc => pc.close());
-      micPeerConnections.current = {};
-      micPendingCandidates.current = {};
       // Remove any injected audio elements
       document.querySelectorAll('[id^="mic-audio-"]').forEach(el => el.remove());
       setIsMicActive(false);
@@ -457,25 +796,6 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         micStream.current = stream;
         setIsMicActive(true);
         socketRef.current?.emit('mic:toggle', { active: true });
-
-        // Establish peer connections with all other users currently in room
-        const others = roomState.users.filter(u => u.userId !== userId);
-        for (const other of others) {
-          const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-          micPeerConnections.current[other.socketId] = pc;
-
-          stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-          pc.onicecandidate = (e) => {
-            if (e.candidate && socketRef.current) {
-              socketRef.current.emit('mic:signal', { targetSocketId: other.socketId, signal: { candidate: e.candidate } });
-            }
-          };
-
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socketRef.current?.emit('mic:signal', { targetSocketId: other.socketId, signal: offer });
-        }
       } catch (err) {
         console.error('[Mic] Failed to get user media:', err);
       }
@@ -490,7 +810,9 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       username, 
       roomId, 
       joinRoom, 
+      leaveRoom,
       isHost,
+      isSharer,
       isScreenSharing,
       screenShareStream,
       startScreenShare,
@@ -500,6 +822,8 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       sendChatMessage,
       isMicActive,
       toggleMic,
+      transferHost,
+      requestHost,
     }}>
       {children}
     </RoomContext.Provider>
