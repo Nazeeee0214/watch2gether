@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { RoomProvider, useRoom } from '@/components/providers/RoomContext';
 import { VideoPlayer } from '@/components/video/VideoPlayer';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { Users, Link as LinkIcon, Check, Monitor, Camera, Mic, MicOff, MessageSquare, LogOut } from 'lucide-react';
+import { Users, Link as LinkIcon, Check, Monitor, Camera, Mic, MicOff, MessageSquare, LogOut, Crown } from 'lucide-react';
 
 // Wrap the main content in RoomProvider
 export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
@@ -26,6 +26,7 @@ function RoomContent({ roomId }: { roomId: string }) {
     joinRoom, roomState, isHost, socket,
     isScreenSharing, startScreenShare, stopScreenShare, isCameraShare,
     isMicActive, toggleMic, leaveRoom,
+    requestHost, transferHost,
   } = useRoom();
 
   const [inputUrl, setInputUrl] = useState('');
@@ -119,6 +120,20 @@ function RoomContent({ roomId }: { roomId: string }) {
               {copied ? <Check size={16} className="text-green-400" /> : <LinkIcon size={16} />}
               {copied ? 'Copied!' : 'Copy Invite Link'}
             </button>
+
+            {!isHost && (
+              <button
+                onClick={() => {
+                  if (window.confirm('Request to become the host?')) {
+                    requestHost();
+                  }
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/20 rounded-xl text-sm font-medium transition-all"
+              >
+                <Crown size={16} />
+                Request Host
+              </button>
+            )}
 
             <button
               onClick={() => {
@@ -235,10 +250,24 @@ function RoomContent({ roomId }: { roomId: string }) {
                       )}
                       <span className="text-sm font-medium truncate">{user.username}</span>
                     </div>
-                    {user.userId === roomState.hostId && (
+                    {user.userId === roomState.hostId ? (
                       <span className="flex-shrink-0 text-xs px-2 py-1 bg-purple-500/10 text-purple-400 rounded-md font-medium ml-2">
                         Host
                       </span>
+                    ) : (
+                      isHost && (
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Are you sure you want to transfer the host role to ${user.username}?`)) {
+                              transferHost(user.userId);
+                            }
+                          }}
+                          className="flex-shrink-0 text-xs px-2 py-1 bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-400 border border-yellow-500/20 rounded-md font-medium ml-2 transition-all active:scale-95 cursor-pointer"
+                          title="Make Host"
+                        >
+                          Make Host
+                        </button>
+                      )
                     )}
                   </li>
                 ))}
